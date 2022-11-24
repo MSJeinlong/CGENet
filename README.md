@@ -1,7 +1,7 @@
 # CGENet
 
 This repository is the official PyTorch implementation of paper "Context-aware Graph Embedding with Gate and Attention
-for Session-based Recommendation"
+for Session-based Recommendation".
 
 + Installation
 

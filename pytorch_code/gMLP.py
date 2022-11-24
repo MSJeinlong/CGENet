@@ -1,3 +1,12 @@
+#!/usr/bin/env python36
+# -*- coding: utf-8 -*-
+"""
+Created on June, 2022
+
+@author: JunlongChi
+"""
+
+
 from torch import nn
 
 

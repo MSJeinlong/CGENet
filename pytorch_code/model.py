@@ -5,18 +5,20 @@ Created on July, 2018
 
 @author: Tangrizzly
 """
-from typing import Any
 import copy
 import datetime
 import math
-from tqdm import tqdm
+from typing import Any
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.nn import Module, Parameter
+from torch.nn import Module
 from torch_geometric.nn import DenseSAGEConv, DenseGCNConv, GATv2Conv
 from torch_geometric.utils import dense_to_sparse
+from tqdm import tqdm
+
 from gMLP import gMLP
 from san import SelfAttention, PositionEmbedding
 

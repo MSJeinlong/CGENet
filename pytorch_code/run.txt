@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=0 python main.py --dataset yoochoose1_64 --k 10 --gnn_layers 3 > logs/yoo64_06.txt &

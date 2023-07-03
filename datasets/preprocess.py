@@ -1,211 +1,249 @@
+#!/usr/bin/env python36
+# -*- coding: utf-8 -*-
+"""
+Created on July, 2018
+
+@author: Tangrizzly
+"""
+
 import argparse
+import csv
+import datetime
 import operator
+import os
 import pickle
 import time
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', default='diginetica', help='dataset name: diginetica/yoochoose/retailrocket/sample')
+parser.add_argument('--dataset', default='sample', help='dataset name: diginetica/yoochoose/sample')
 opt = parser.parse_args()
-dataset = opt.dataset
-print(dataset)
+print(opt)
 
-if dataset == 'retailrocket':
-    ds = './retailrocket/events_train_full.0.txt'
-elif dataset == 'yoochoose':
-    ds = './yoochoose/yoochoose-clicks.dat'
-elif dataset == 'diginetica':
-    ds = './diginetica/train-item-views.csv'
+dataset = 'sample_train-item-views.csv'
+if opt.dataset == 'diginetica':
+    dataset = 'diginetica/train-item-views.csv'
+elif opt.dataset == 'yoochoose':
+    dataset = 'yoochoose-clicks.dat'
 
-with open(ds, "r") as f:
-    if dataset == 'retailrocket' or dataset == 'diginetica':
-        lines = f.readlines()[1:]
+print("-- Starting @ %ss" % datetime.datetime.now())
+with open(dataset, "r") as f:
+    if opt.dataset == 'yoochoose':
+        reader = csv.DictReader(f, delimiter=',')
     else:
-        lines = f.readlines()
+        reader = csv.DictReader(f, delimiter=';')
     sess_clicks = {}
     sess_date = {}
-    for line in lines:
-        if dataset == 'retailrocket':
-            data = [int(x) for x in line.split()]
-            sess_id = data[3]
-            item = data[2]
-            timestamp = data[0]
-        elif dataset == 'yoochoose':
-            data = [x for x in line.split(",")]
-            sess_id = int(data[0])
-            item = int(data[2])
-            timestamp = time.mktime(time.strptime(data[1][:19], '%Y-%m-%dT%H:%M:%S'))
-        elif dataset == 'diginetica':
-            data = [x for x in line.split(";")]
-            sess_id = int(data[0])
-            timestamp = time.mktime(time.strptime(data[4][:-1], '%Y-%m-%d'))
-            timeframe = int(data[3])
-            item = (int(data[2]), timestamp, timeframe)
-
-        if sess_id in sess_clicks:
-            sess_clicks[sess_id] += [item]
-            sess_date[sess_id] = timestamp
+    ctr = 0
+    curid = -1
+    curdate = None
+    for data in reader:
+        sessid = data['session_id']
+        if curdate and not curid == sessid:
+            date = ''
+            if opt.dataset == 'yoochoose':
+                date = time.mktime(time.strptime(curdate[:19], '%Y-%m-%dT%H:%M:%S'))
+            else:
+                date = time.mktime(time.strptime(curdate, '%Y-%m-%d'))
+            sess_date[curid] = date
+        curid = sessid
+        if opt.dataset == 'yoochoose':
+            item = data['item_id']
         else:
-            sess_clicks[sess_id] = [item]
-            sess_date[sess_id] = timestamp
+            item = data['item_id'], int(data['timeframe'])
+        curdate = ''
+        if opt.dataset == 'yoochoose':
+            curdate = data['timestamp']
+        else:
+            curdate = data['eventdate']
 
-    if dataset == 'diginetica':
+        if sessid in sess_clicks:
+            sess_clicks[sessid] += [item]
+        else:
+            sess_clicks[sessid] = [item]
+        ctr += 1
+    date = ''
+    if opt.dataset == 'yoochoose':
+        date = time.mktime(time.strptime(curdate[:19], '%Y-%m-%dT%H:%M:%S'))
+    else:
+        date = time.mktime(time.strptime(curdate, '%Y-%m-%d'))
         for i in list(sess_clicks):
-            sorted_clicks = sorted(sess_clicks[i], key=lambda x: (x[1], x[2]))
+            sorted_clicks = sorted(sess_clicks[i], key=operator.itemgetter(1))
             sess_clicks[i] = [c[0] for c in sorted_clicks]
-print("length of session clicks: %d" % len(sess_clicks))
+    sess_date[curid] = date
+print("-- Reading data @ %ss" % datetime.datetime.now())
 
-filter_len = 2
-total_len = 0
-session_num = 0
+# Filter out length 1 sessions
 for s in list(sess_clicks):
-    if len(sess_clicks[s]) <= filter_len:
+    if len(sess_clicks[s]) == 1:
         del sess_clicks[s]
         del sess_date[s]
-    else:
-        total_len += len(sess_clicks[s])
-        session_num += 1
-print("after filter out length of %d, length of session clicks: %d" % (filter_len, len(sess_clicks)))
-print("average length of session: %.2f" % (total_len / session_num))
 
-item_counts = {}
+# Count number of times each item appears
+iid_counts = {}
 for s in sess_clicks:
     seq = sess_clicks[s]
     for iid in seq:
-        if iid in item_counts:
-            item_counts[iid] += 1
+        if iid in iid_counts:
+            iid_counts[iid] += 1
         else:
-            item_counts[iid] = 1
+            iid_counts[iid] = 1
 
-sorted_counts = sorted(item_counts.items(), key=operator.itemgetter(1))
+sorted_counts = sorted(iid_counts.items(), key=operator.itemgetter(1))
 
+length = len(sess_clicks)
 for s in list(sess_clicks):
     curseq = sess_clicks[s]
-    filseq = list(filter(lambda i: item_counts[i] >= 5, curseq))
-    if len(filseq) <= filter_len:
+    filseq = list(filter(lambda i: iid_counts[i] >= 5, curseq))
+    if len(filseq) < 2:
         del sess_clicks[s]
         del sess_date[s]
     else:
         sess_clicks[s] = filseq
-print("after item<5 , length of session clicks: %d" % len(sess_clicks))
 
+# Split out test set based on dates
 dates = list(sess_date.items())
-max_timestamp = dates[0][1]
+maxdate = dates[0][1]
 
 for _, date in dates:
-    max_timestamp = max(max_timestamp, date)  # latest date
+    if maxdate < date:
+        maxdate = date
 
-if dataset == 'retailrocket' or dataset == 'diginetica':
-    split_timestamp = max_timestamp - 7 * 86400
+# 7 days for test
+splitdate = 0
+if opt.dataset == 'yoochoose':
+    splitdate = maxdate - 86400 * 1  # the number of seconds for a day：86400
 else:
-    split_timestamp = max_timestamp - 86400
+    splitdate = maxdate - 86400 * 7
 
-print("split timestamp: %d" % split_timestamp)
-train_session = filter(lambda x: x[1] < split_timestamp, dates)
-test_session = filter(lambda x: x[1] > split_timestamp, dates)
+print('Splitting date', splitdate)  # Yoochoose: ('Split date', 1411930799.0)
+tra_sess = filter(lambda x: x[1] < splitdate, dates)
+tes_sess = filter(lambda x: x[1] > splitdate, dates)
 
-train_session = sorted(train_session, key=operator.itemgetter(1))
-test_session = sorted(test_session, key=operator.itemgetter(1))
+# Sort sessions by date
+tra_sess = sorted(tra_sess, key=operator.itemgetter(1))  # [(session_id, timestamp), (), ]
+tes_sess = sorted(tes_sess, key=operator.itemgetter(1))  # [(session_id, timestamp), (), ]
+print(len(tra_sess))  # 186670    # 7966257
+print(len(tes_sess))  # 15979     # 15324
+print(tra_sess[:3])
+print(tes_sess[:3])
+print("-- Splitting train set and test set @ %ss" % datetime.datetime.now())
 
+# Choosing item count >=5 gives approximately the same number of items as reported in paper
 item_dict = {}
 
 
-def get_train():
-    tra_sid = []
-    tra_seq = []
-    tra_timestamp = []
-    item_cnt = 1
-    for s, t in train_session:
+# Convert training sessions to sequences and renumber items to start from 1
+def obtian_tra():
+    train_ids = []
+    train_seqs = []
+    train_dates = []
+    item_ctr = 1
+    for s, date in tra_sess:
         seq = sess_clicks[s]
         outseq = []
-        if len(seq) < filter_len:
-            continue
         for i in seq:
             if i in item_dict:
                 outseq += [item_dict[i]]
             else:
-                item_dict[i] = item_cnt
-                outseq += [item_dict[i]]
-                item_cnt += 1
-        tra_sid += [s]
-        tra_timestamp += [t]
-        tra_seq += [outseq]
-    print('item_num: %d' % (item_cnt - 1))
-    return tra_sid, tra_timestamp, tra_seq
+                outseq += [item_ctr]
+                item_dict[i] = item_ctr
+                item_ctr += 1
+        if len(outseq) < 2:  # Doesn't occur
+            continue
+        train_ids += [s]
+        train_dates += [date]
+        train_seqs += [outseq]
+    print("item num:" + str(item_ctr))  # 43098, 37484
+    return train_ids, train_dates, train_seqs
 
 
-def get_test():
-    tes_sid = []
-    tes_seq = []
-    tes_timestamp = []
-    for s, t in test_session:
+# Convert test sessions to sequences, ignoring items that do not appear in training set
+def obtian_tes():
+    test_ids = []
+    test_seqs = []
+    test_dates = []
+    for s, date in tes_sess:
         seq = sess_clicks[s]
         outseq = []
         for i in seq:
             if i in item_dict:
                 outseq += [item_dict[i]]
-        if len(outseq) < filter_len:
+        if len(outseq) < 2:
             continue
-        tes_sid += [s]
-        tes_timestamp += [t]
-        tes_seq += [outseq]
-    return tes_sid, tes_timestamp, tes_seq
+        test_ids += [s]
+        test_dates += [date]
+        test_seqs += [outseq]
+    return test_ids, test_dates, test_seqs
 
 
-train_sid, train_timestamp, train_seq = get_train()
-test_sid, test_timestamp, test_seq = get_test()
-print("training: %d" % len(train_sid))
-print("testing: %d" % len(test_sid))
+tra_ids, tra_dates, tra_seqs = obtian_tra()
+tes_ids, tes_dates, tes_seqs = obtian_tes()
 
 
-def split_seq(sid, timestamp, seq):
-    x = []
-    t = []
-    y = []
-    s_id = []
-    for sid, seq, timestamp in zip(sid, seq, timestamp):
-        if filter_len == 2:
-            temp = len(seq) - 1
-        else:
-            temp = len(seq)
-        for i in range(1, temp):
-            y += [seq[-i]]
-            x += [seq[:-i]]
-            t += [timestamp]
-            s_id += [sid]
-    return x, t, y, s_id
+def process_seqs(iseqs, idates):
+    out_seqs = []
+    out_dates = []
+    labs = []
+    ids = []
+    for id, seq, date in zip(range(len(iseqs)), iseqs, idates):
+        for i in range(1, len(seq)):
+            tar = seq[-i]
+            labs += [tar]
+            out_seqs += [seq[:-i]]
+            out_dates += [date]
+            ids += [id]
+    return out_seqs, out_dates, labs, ids
 
 
-def split_seq_train(sid, timestamp, seq):
-    x = []
-    t = []
-    s_id = []
-    for sid, seq, timestamp in zip(sid, seq, timestamp):
-        if len(seq) > filter_len:
-            x += [seq]
-            t += [timestamp]
-            s_id += [sid]
-        if filter_len == 2:
-            temp = len(seq) - 1
-        else:
-            temp = len(seq)
-        for i in range(1, temp):
-            x += [seq[:-i]]
-            t += [timestamp]
-            s_id += [sid]
-    return x, t, s_id
+tr_seqs, tr_dates, tr_labs, tr_ids = process_seqs(tra_seqs, tra_dates)
+te_seqs, te_dates, te_labs, te_ids = process_seqs(tes_seqs, tes_dates)
+tra = (tr_seqs, tr_labs)
+tes = (te_seqs, te_labs)
+print(len(tr_seqs))
+print(len(te_seqs))
+print(tr_seqs[:3], tr_dates[:3], tr_labs[:3])
+print(te_seqs[:3], te_dates[:3], te_labs[:3])
+all = 0
 
+for seq in tra_seqs:
+    all += len(seq)
+for seq in tes_seqs:
+    all += len(seq)
+print('avg length: ', all / (len(tra_seqs) + len(tes_seqs) * 1.0))
+#  preprocess diginetica dataset
+if opt.dataset == 'diginetica':
+    if not os.path.exists('diginetica'):
+        os.makedirs('diginetica')
+    pickle.dump(tra, open('diginetica/train.txt', 'wb'))
+    pickle.dump(tes, open('diginetica/test.txt', 'wb'))
+    pickle.dump(tra_seqs, open('diginetica/all_train_seq.txt', 'wb'))
+#  preprocess yoochoose dataset
+elif opt.dataset == 'yoochoose':
+    if not os.path.exists('yoochoose1_4'):
+        os.makedirs('yoochoose1_4')
+    if not os.path.exists('yoochoose1_64'):
+        os.makedirs('yoochoose1_64')
+    pickle.dump(tes, open('yoochoose1_4/test.txt', 'wb'))
+    pickle.dump(tes, open('yoochoose1_64/test.txt', 'wb'))
 
-tr_seq, tr_timestamp, tr_predict, tr_sid = split_seq(train_sid, train_timestamp, train_seq)
-te_seq, te_timestamp, te_predict, te_sid = split_seq(test_sid, test_timestamp, test_seq)
+    split4, split64 = int(len(tr_seqs) / 4), int(len(tr_seqs) / 64)
+    print(len(tr_seqs[-split4:]))
+    print(len(tr_seqs[-split64:]))
 
-print("after split,training: %d" % len(tr_seq))
-print("after split,testing: %d" % len(te_seq))
+    tra4, tra64 = (tr_seqs[-split4:], tr_labs[-split4:]), (tr_seqs[-split64:], tr_labs[-split64:])
+    seq4, seq64 = tra_seqs[tr_ids[-split4]:], tra_seqs[tr_ids[-split64]:]
 
-train_data = (tr_sid, tr_seq, tr_predict, tr_timestamp)
-test_data = (te_sid, te_seq, te_predict, te_timestamp)
+    pickle.dump(tra4, open('yoochoose1_4/train.txt', 'wb'))
+    pickle.dump(seq4, open('yoochoose1_4/all_train_seq.txt', 'wb'))
 
-pickle.dump(train_data, open('./' + str(dataset) + '/train.txt', 'wb'))
-pickle.dump(test_data, open('./' + str(dataset) + '/test.txt', 'wb'))
-pickle.dump(train_seq, open('./' + str(dataset) + '/all_train_seq.txt', 'wb'))
+    pickle.dump(tra64, open('yoochoose1_64/train.txt', 'wb'))
+    pickle.dump(seq64, open('yoochoose1_64/all_train_seq.txt', 'wb'))
 
-print("finish")
+else:
+    if not os.path.exists('sample'):
+        os.makedirs('sample')
+    pickle.dump(tra, open('sample/train.txt', 'wb'))
+    pickle.dump(tes, open('sample/test.txt', 'wb'))
+    pickle.dump(tra_seqs, open('sample/all_train_seq.txt', 'wb'))
+
+print('Done.')

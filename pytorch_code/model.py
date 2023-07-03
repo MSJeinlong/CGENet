@@ -5,20 +5,18 @@ Created on July, 2018
 
 @author: Tangrizzly
 """
+from typing import Any
 import copy
 import datetime
 import math
-from typing import Any
-
+from tqdm import tqdm
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.nn import Module
-from torch_geometric.nn import GATv2Conv
+from torch.nn import Module, Parameter
+from torch_geometric.nn import DenseSAGEConv, DenseGCNConv, GATv2Conv
 from torch_geometric.utils import dense_to_sparse
-from tqdm import tqdm
-
 from gMLP import gMLP
 from san import SelfAttention, PositionEmbedding
 
@@ -76,11 +74,9 @@ class DenseGINConv(torch.nn.Module):
 
         adj_in = adj[:, :, :N]
         adj_out = adj[:, :, N:]
-
         out = torch.matmul(adj_in, x) + torch.matmul(adj_out, x)
         if add_loop:
             out = (1 + self.eps) * x + out
-
         out = self.nn(out)
 
         if mask is not None:
@@ -99,17 +95,19 @@ class HighwayGate(nn.Module):
 
     def forward(self, h0, hl):
         g = torch.sigmoid(self.W(torch.cat([h0, hl], dim=-1)))
+        # print("Highway Gate:")
+        # print("g: ", g.shape)
         out = g * h0 + (1 - g) * hl
         return out
 
 
 class MLP4GIN(nn.Module):
-    def __init__(self, in_dim, out_dim, norm_eps=1e-8):
+    def __init__(self, in_dim, hidden_dim, out_dim, norm_eps=1e-8):
         super(MLP4GIN, self).__init__()
-        self.linear1 = nn.Linear(in_dim, out_dim)
-        self.norm = nn.BatchNorm1d(out_dim, eps=norm_eps)
+        self.linear1 = nn.Linear(in_dim, hidden_dim)
+        self.norm = nn.BatchNorm1d(hidden_dim, eps=norm_eps)
         self.act = nn.ReLU(inplace=True)
-        self.linear2 = nn.Linear(out_dim, out_dim)
+        self.linear2 = nn.Linear(hidden_dim, out_dim)
 
     def forward(self, x):
         x = self.linear1(x)
@@ -140,7 +138,9 @@ class BasicGNN(nn.Module):
         for i in range(self.num_layers):
             x = self.gnn[i](x, adj, mask)
             if self.norms is not None:
+                x = x.transpose(1, 2)
                 x = self.norms[i](x)
+                x = x.transpose(1, 2)
             if self.act is not None:
                 x = self.act(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
@@ -152,7 +152,21 @@ class GIN(BasicGNN):
         super(GIN, self).__init__(num_layers, in_dim, out_dim, act, dropout, norm)
 
         for _ in range(num_layers):
-            self.gnn.append(DenseGINConv(MLP4GIN(in_dim, out_dim, norm_eps=norm_eps)))
+            self.gnn.append(DenseGINConv(MLP4GIN(in_dim, in_dim, out_dim, norm_eps=norm_eps)))
+
+
+class GCN(BasicGNN):
+    def __init__(self, num_layers, in_dim, out_dim, act=nn.ReLU(inplace=True), dropout=0.0, norm=None):
+        super(GCN, self).__init__(num_layers, in_dim, out_dim, act, dropout, norm)
+        for _ in range(num_layers):
+            self.gnn.append(DenseGCNConv(in_dim, out_dim))
+
+
+class SAGE(BasicGNN):
+    def __init__(self, num_layers, in_dim, out_dim, act=nn.ReLU(inplace=True), dropout=0.0, norm=None):
+        super(SAGE, self).__init__(num_layers, in_dim, out_dim, act, dropout, norm)
+        for _ in range(num_layers):
+            self.gnn.append(DenseSAGEConv(in_dim, out_dim))
 
 
 class GateUnit(nn.Module):
@@ -179,8 +193,8 @@ class SessionGAT(nn.Module):
         scale = 1.0 / math.sqrt(D)
         attn = torch.einsum("bd, sd -> bs", x, x)
         attn = torch.softmax(attn * scale, dim=1)
-        # Select K neighbor session nodes with the smallest cosine distance for each session node,
-        # that is, these neighbor nodes have edge connections with the current node
+        # 为每个会话节点选出余弦距离最小的K个邻居会话节点，即这些邻居节点和当前节点有边连接
+        # print("attn' shape: ", attn.shape)
         _, indices = torch.topk(attn, dim=1, k=self.k)
         adj = torch.zeros_like(attn)
         adj.scatter_(1, indices.long(), 1)
@@ -209,13 +223,15 @@ class SessionGraph(Module):
         self.embedding = nn.Embedding(self.n_node, self.hidden_size)
         # self.gnn = GNN(self.hidden_size, step=opt.step)
         self.gnn = GIN(num_layers=opt.gnn_layers, in_dim=self.hidden_size, out_dim=self.hidden_size,
-                       dropout=opt.dropout)
+                       dropout=opt.dropout, norm=nn.BatchNorm1d(self.hidden_size))
         self.highway_gate = HighwayGate(in_dim=self.hidden_size, out_dim=self.hidden_size)
-        self.gmlp = gMLP(d_model=self.hidden_size, d_ffn=self.hidden_size * 2, seq_len=opt.max_len,
-                         num_layers=opt.gmlp_layers, dropout=opt.dropout, norm_eps=opt.layer_norm_eps)
+        if not self.no_gmlp and not self.use_san:
+            self.gmlp = gMLP(d_model=self.hidden_size, d_ffn=self.hidden_size * 2, seq_len=opt.max_len,
+                             num_layers=opt.gmlp_layers, dropout=opt.dropout, norm_eps=opt.layer_norm_eps)
         self.gate = GateUnit(self.hidden_size, self.hidden_size)
-        self.sessionGAT = SessionGAT(self.hidden_size, self.hidden_size, heads=1, concat=True,
-                                     dropout=opt.dropout, k=opt.k)
+        if not self.no_sca:
+            self.sessionGAT = SessionGAT(self.hidden_size, self.hidden_size, heads=1, concat=True,
+                                         dropout=opt.dropout, k=opt.k)
         self.s_ln = nn.LayerNorm(self.hidden_size, eps=1e-8)
         self.b_ln = nn.LayerNorm(self.hidden_size, eps=1e-8)
         self.linear_transform = nn.Linear(self.hidden_size * 2, self.hidden_size, bias=False)
@@ -231,6 +247,8 @@ class SessionGraph(Module):
             weight.data.uniform_(-stdv, stdv)
 
     def compute_scores(self, hidden, mask):
+        # ht 是最后一个点击物品的特征向量     , 即 ht = sl = vn (短期偏好)
+        # ht = hidden[torch.arange(mask.shape[0]).long(), torch.sum(mask, 1) - 1]  # batch_size x latent_size
         mask = mask.float().unsqueeze(-1)
         s_local = torch.sum(hidden * mask, 1) / torch.sum(mask, 1)
 
@@ -254,6 +272,9 @@ class SessionGraph(Module):
                 s_final = self.linear_transform(torch.cat([s_final, s_cross], dim=-1))
             elif self.aggregation == "gate":
                 s_final = self.aggr_gate(s_final, s_cross)
+        # s_final = self.linear_transform(torch.cat([s_final, s_cross], dim=-1))
+        # if not self.nonhybrid:
+        # s_final = self.linear_transform(torch.cat([s_g, ht], 1))
         b = self.embedding.weight[1:]  # n_nodes x latent_size
         s_final = self.s_ln(s_final)
         b = self.b_ln(b)
@@ -262,7 +283,10 @@ class SessionGraph(Module):
 
     def forward(self, items, adj, mask):
         items_emb = self.embedding(items)
+        # adj = torch.softmax(adj, dim=-1)
         h0 = F.dropout(items_emb, p=self.dropout, training=self.training)
+        # print("h0: ", h0.shape)
+        # print("adj: ", adj.shape)
         hl = self.gnn(h0, adj, mask)
         if not self.no_hn:
             hl = self.highway_gate(h0, hl)
@@ -293,6 +317,8 @@ def forward(model, data):
     hidden = model(items, adj, mask)
     get = lambda index: hidden[index][alias_inputs[index]]
     seq_hidden = torch.stack([get(i) for i in torch.arange(len(alias_inputs)).long()])
+    # print("hidden: ", hidden.shape)
+    # print("seq_hidden: ", seq_hidden.shape)
     return targets, model.compute_scores(seq_hidden, mask)
 
 

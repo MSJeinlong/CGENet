@@ -11,7 +11,7 @@ import pickle
 import time
 
 from model import *
-from utils_gce_gnn import Data, split_validation
+from utils import Data, split_validation
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', default='diginetica', help='dataset name: diginetica/yoochoose1_4/yoochoose1_64/Tmall')
